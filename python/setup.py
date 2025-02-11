@@ -5,7 +5,7 @@ module = Extension(
     "PolyPQ",
     sources=[
         os.path.join("..", "PolyPQ", "kmeans.c"),
-        os.path.join("..", "PolyPQ", "pq.c"),         # <-- New file
+  #      os.path.join("..", "PolyPQ", "pq.c"),         # <-- New file
         os.path.join("..", "c_api", "pykmeansmodule.c"),# Existing wrapper (or pypqmodule.c if separate)
     ],
     include_dirs=[os.path.join("..", "PolyPQ")],
