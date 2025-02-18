@@ -5,3 +5,9 @@ python/dist
 python/*.egg-info
 data
 python/__pycache__
+.venv
+python/*.db
+python/*.log
+python/*.pkl
+python/*.txt
+python/*.png
