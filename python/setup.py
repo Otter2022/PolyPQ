@@ -9,7 +9,7 @@ module = Extension(
         os.path.join("..", "c_api", "pykmeansmodule.c"),# Existing wrapper (or pypqmodule.c if separate)
     ],
     include_dirs=[os.path.join("..", "PolyPQ")],
-    # extra_compile_args=["-DKMEANS_THREADED"],  # if needed
+    extra_compile_args=["-DKMEANS_THREADED", "-pthread"]
 )
 
 setup(

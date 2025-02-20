@@ -11,3 +11,4 @@ python/*.log
 python/*.pkl
 python/*.txt
 python/*.png
+.DS_Store

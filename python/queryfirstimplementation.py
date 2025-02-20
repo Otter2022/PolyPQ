@@ -5,6 +5,8 @@ import pickle
 import numpy as np
 import re
 import matplotlib.pyplot as plt
+import argparse
+import time  # For timing queries
 
 # ---------- Helper Functions ----------
 
@@ -114,9 +116,9 @@ def evaluate_recall_from_gt_dir(gt_dir, query_file, codebook, pq_index, grid_siz
     Given a directory of groundtruth files and a query file, this function:
       1. Loads and merges all groundtruth data (mapping query_id to a set of true neighbor IDs).
       2. Reads the query vectors from the query file.
-      3. For each query, performs PQ-based approximate search (using the provided codebook and pq_index)
-         and computes recall@k (the fraction of the groundtruth neighbors retrieved).
-      4. Prints and returns the average recall over all queries.
+      3. For each query, performs PQ-based approximate search (using the provided codebook and pq_index),
+         computes the recall@k, and times how long the query takes.
+      4. Prints and returns the average recall over all queries, along with total query time.
     
     It is assumed that the queries in query_file correspond (in order) to the groundtruth query IDs.
     If 'query_offset' is provided, the first query is assigned that ID; otherwise, the offset is taken as min(groundtruth.keys()).
@@ -127,14 +129,19 @@ def evaluate_recall_from_gt_dir(gt_dir, query_file, codebook, pq_index, grid_siz
     query_strings = readEncodeFile(query_file)
     if not groundtruth:
         print("No groundtruth found!")
-        return 0.0
+        return 0.0, 0, [], 0.0
     
     total_recall = 0.0
     valid_queries = 0
     recall_values = []
+    total_query_time = 0.0  # Total time taken by all queries
     for i, q_str in enumerate(query_strings):
         query_vector = reconstruct_dense_vector(q_str, grid_size)
+        start_time = time.perf_counter()
         candidate_ids, _ = query_database(query_vector, codebook, pq_index, grid_size, m, k=k, metric=metric)
+        end_time = time.perf_counter()
+        total_query_time += (end_time - start_time)
+        
         retrieved_set = set(candidate_ids)
         query_id = i + query_offset  # Use the provided offset
         if query_id in groundtruth:
@@ -144,15 +151,9 @@ def evaluate_recall_from_gt_dir(gt_dir, query_file, codebook, pq_index, grid_siz
                 recall_values.append(recall)
                 total_recall += recall
                 valid_queries += 1
-                print(f"Query {query_id}: Recall@{k} = {recall:.3f}")
-            else:
-                print(f"Query {query_id}: No groundtruth neighbors provided.")
-        else:
-            print(f"Query {query_id} not found in groundtruth.")
     average_recall = total_recall / valid_queries if valid_queries > 0 else 0.0
     print(f"\nAverage Recall@{k}: {average_recall:.3f} over {valid_queries} queries")
-    return total_recall, valid_queries, recall_values
-
+    return total_recall, valid_queries, recall_values, total_query_time
 
 def compute_std_dev(data, mean):
     """
@@ -160,53 +161,82 @@ def compute_std_dev(data, mean):
     """
     return np.sqrt(np.mean([(x - mean)**2 for x in data]))
 
+def check_file_in_dir(directory, filename):
+    """
+    Checks if a file with the given name exists in the provided directory.
+    """
+    return os.path.isfile(os.path.join(directory, filename))
+
 def plot_recall_distribution(recall_values, k):
     """
     Plots a histogram of the recall values.
     """
-    filename = f"recall_distribution_{k}.png"
+    cnt = 0
+    filename = f"recall_distribution_{k}().png"
+
+    while filename in os.listdir():
+        cnt += 1
+        filename = f"recall_distribution_{k}({cnt}).png"
+
     plt.figure(figsize=(8, 6))
     plt.hist(recall_values, bins=20, edgecolor='black', alpha=0.7)
     plt.xlabel(f"Recall@{k}")
     plt.ylabel("Frequency")
     plt.title(f"Distribution of Recall@{k} over Queries")
     plt.savefig(filename, dpi=300)
-    plt.show()
 
 # ---------- Example Usage ----------
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="Evaluate recall for PQ-based approximate search using a given codebook and PQ index."
+    )
+    parser.add_argument("--k", type=int, default=250, help="The number of top results to return per query.")
+    parser.add_argument("--db_file", type=str, default="pq_index.db", help="Path to the shelve db file for the PQ index.")
+    parser.add_argument("--codebook_file", type=str, default="codebook.pkl", help="Path to the pickle file containing the codebook.")
+    args = parser.parse_args()
+
     # Parameters
     grid_size = 18382   # Dimensionality of the full vectors
     m = 14              # Number of subspaces (as used during clustering)
-    k = 250              # Evaluate recall@10
+    k = args.k        # Number of neighbors to return (from command line)
     gt_dir = "../data/pk-query-50k"  # Directory containing groundtruth files (CSV format)
-    query_dir = "../data/tmp/shared/encoding/pk-50k0.002"  # File with query vectors
+    query_dir = "../data/tmp/shared/encoding/pk-50k0.002"  # Directory containing query vector files
 
     # Load the PQ codebook (list of m arrays) from file.
-    with open("codebook.pkl", "rb") as f:
+    with open(args.codebook_file, "rb") as f:
         codebook = pickle.load(f)
-    print("Codebook loaded from 'codebook.pkl'.")
+    print(f"Codebook loaded from '{args.codebook_file}'.")
 
     # Open the PQ index (persistent key–value store) and load it into a dictionary.
-    with shelve.open("pq_index.db") as db:
+    with shelve.open(args.db_file) as db:
         # Keys in shelve are stored as strings; convert them back to integers.
         pq_index = {int(key): db[key] for key in db.keys()}
-    print("PQ index loaded from 'pq_index.db'.")
+    print(f"PQ index loaded from '{args.db_file}'.")
 
     count = 0
     recall_sum = 0
     recall_values = []
+    total_query_time_sum = 0.0
 
     for i in os.listdir(query_dir):
-
+        # Extract starting index from the filename (assumes a number is present)
         starting_index = re.findall(r'\d+', i)[0]
-
         if int(starting_index) >= 40000:
-            recall_total, valid_queries, _recall_values = evaluate_recall_from_gt_dir(gt_dir, os.path.join(query_dir, i), codebook, pq_index, grid_size, m, k=k, metric='jaccard', query_offset=int(starting_index))
+            query_file = os.path.join(query_dir, i)
+            rec_total, valid_queries, _recall_values, query_time = evaluate_recall_from_gt_dir(
+                gt_dir, query_file, codebook, pq_index, grid_size, m, k=k, metric='jaccard', query_offset=int(starting_index)
+            )
             count += valid_queries
-            recall_sum += recall_total
+            recall_sum += rec_total
             recall_values.extend(_recall_values)
+            total_query_time_sum += query_time
     
-    print(f"\nAverage Recall@{k} over {count} queries: {recall_sum / count:.3f}, std dev: {compute_std_dev(recall_values, recall_sum / count):.3f}") 
+    if count > 0:
+        avg_recall = recall_sum / count
+        avg_query_time = total_query_time_sum / count
+        print(f"\nAverage Recall@{k} over {count} queries: {avg_recall:.3f}, std dev: {compute_std_dev(recall_values, avg_recall):.3f}")
+        print(f"Average Query Time: {avg_query_time:.6f} seconds per query")
+    else:
+        print("No valid queries evaluated.")
     plot_recall_distribution(recall_values, k)

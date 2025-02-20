@@ -1,9 +1,12 @@
 import os
 import numpy as np
 import matplotlib.pyplot as plt
-from sklearn_extra.cluster import KMedoids
 import pickle  # For saving the codebook
-import shelve  # For creating a persistent key-value store
+import shelve  # For creating a persistent key–value store
+import re
+import random
+import PolyPQ  # Our C-based k-means module
+from joblib import Parallel, delayed  # For parallel processing
 
 def sortFilesByIdData(files):
     """
@@ -27,12 +30,15 @@ def readEncodeFile(filepath):
         lines = f.readlines()
     return [line.strip() for line in lines if line.strip()]
 
-def readAllSparseStr(path):
+def readAllSparseStr(path, exclusion_regex=None):
     """
     Reads all sparse vector strings from files in the given folder.
     """
     files = os.listdir(path)
     files = sortFilesByIdData(files)
+
+    if exclusion_regex:
+        files = [f for f in files if not re.match(exclusion_regex, f)]
     
     vector_str = []
     for file in files:
@@ -81,6 +87,45 @@ def make_subvector_groups(sparse_vecs, m, d):
             subvector_groups[j].append(subvectors[j])
     return subvector_groups
 
+# --- Helper functions for medoid computation using Jaccard distance ---
+
+def jaccard_distance(a, b):
+    """
+    Computes the Jaccard distance between two binary vectors.
+    """
+    a = np.array(a)
+    b = np.array(b)
+    inter = np.sum((a != 0) & (b != 0))
+    union = np.sum((a != 0) | (b != 0))
+    return 1 - (inter / union) if union != 0 else 1
+
+def compute_medoid(points):
+    """
+    Computes the medoid of a list of points (each a list of numbers) based on Jaccard distance.
+    Returns the point with the minimal total distance to all other points.
+    """
+    if not points:
+        return None
+    best_point = points[0]
+    best_total = float('inf')
+    for p in points:
+        total = sum(jaccard_distance(p, q) for q in points)
+        if total < best_total:
+            best_total = total
+            best_point = p
+    return best_point
+
+def compute_cluster_medoid(c, group_points, labels, initial_center):
+    """
+    Computes the medoid for cluster 'c' from group_points given the cluster assignments in labels.
+    If no points are assigned to the cluster, returns the initial_center.
+    """
+    cluster_points = [pt for pt, lab in zip(group_points, labels) if lab == c]
+    if cluster_points:
+        return compute_medoid(cluster_points)
+    else:
+        return initial_center
+
 if __name__ == "__main__":
     # --- Configuration ---
     data_path = "../data/tmp/shared/encoding/pk-50k0.002/"
@@ -88,47 +133,60 @@ if __name__ == "__main__":
     m = 14               # Number of subvectors/subspaces
     num_clusters = 256   # Number of clusters per subspace
 
+    # Exclude files with numbers >= 40000 in their name
+    exclusion_regex = r'^.*_(?:[4-9]\d{4}|\d{6,}).*$'
+    
     # --- Read and process vectors ---
-    all_vector_str = readAllSparseStr(data_path)
+    all_vector_str = readAllSparseStr(data_path, exclusion_regex=exclusion_regex)
     print(f"Read {len(all_vector_str)} sparse vectors.")
-
-    # (Optional) If you need the full dense vectors later, you can reconstruct them here:
-    # dense_vectors = [reconstruct_dense_vector(s, d) for s in all_vector_str]
 
     # Group subvectors by subspace (order is preserved)
     subvectors = make_subvector_groups(all_vector_str, m, d)
     print(f"Split vectors into {m} subvectors of size {d//m}.")
 
-    # --- Build the codebook ---
-    # For each subspace, perform clustering to get the codebook (cluster centers)
-    codebook = []       # List to hold the codebook for each subspace
+    # --- Build the codebook using PolyPQ.kmeans ---
+    # For each subspace, we will cluster the subvectors using our k-means implementation.
+    codebook = []       # List to hold the codebook for each subspace (medoids)
     all_labels = []     # List to hold the cluster labels (assignments) for each subspace
 
     for group_index, subvector_group in enumerate(subvectors):
-        group_data = np.array(subvector_group)  # shape: (num_vectors, subvector_size)
-        print(f"Processing subvector group {group_index} with shape {group_data.shape} ...")
+        # Convert each subvector to a list of floats
+        group_points = [list(map(float, vec)) for vec in subvector_group]
+        num_points = len(group_points)
         
-        # Adjust the number of clusters if necessary
-        current_clusters = num_clusters if group_data.shape[0] >= num_clusters else group_data.shape[0]
+        # Adjust the number of clusters if needed
+        current_clusters = num_clusters if num_points >= num_clusters else num_points
         if current_clusters != num_clusters:
             print(f"Group {group_index}: Reducing number of clusters to {current_clusters}")
 
-        # Cluster using KMedoids with Jaccard distance
-        kmedoids = KMedoids(n_clusters=current_clusters, metric='jaccard', init='k-medoids++', random_state=42)
-        labels = kmedoids.fit_predict(group_data)
-        all_labels.append(labels)  # Save the labels for this subspace
+        # Randomly select initial centers from the group points
+        initial_centers = random.sample(group_points, current_clusters)
 
-        centers = kmedoids.cluster_centers_
+        # Run k-means using the PolyPQ module with Jaccard distance
+        labels = PolyPQ.kmeans(group_points, initial_centers, max_iterations=999999, metric="jaccard")
+        all_labels.append(labels)
+
+        print("Created labels for group", group_index)
+        
+        # **** remove because slow ****
+        # --- Parallelized medoid computation for each cluster ---
+        # centers = Parallel(n_jobs=16)(
+        #     delayed(compute_cluster_medoid)(c, group_points, labels, initial_centers[c])
+        #     for c in range(current_clusters)
+        # )
+
+        centers = initial_centers
+        
         print(f"Group {group_index}: Found clusters: {np.unique(labels)}")
-        codebook.append(centers)
+        codebook.append(np.array(centers))
 
     # Save the codebook (this can later be used for query processing)
-    with open("codebook.pkl", "wb") as f:
+    with open("Kmeans_codebook.pkl", "wb") as f:
         pickle.dump(codebook, f)
-    print("Codebook saved to 'codebook.pkl'.")
+    print("Codebook saved to 'Kmeans_codebook.pkl'.")
 
     # --- Build and save the PQ index ---
-    # For each original vector (preserved in order), combine the cluster assignments from all m groups.
+    # For each original vector (order preserved), combine the cluster assignments from all m subspaces.
     num_vectors = len(all_vector_str)
     pq_index = {}
     for i in range(num_vectors):
@@ -136,9 +194,8 @@ if __name__ == "__main__":
         code = tuple(all_labels[j][i] for j in range(m))
         pq_index[i] = code
 
-    # Save the PQ index in a binary key–value store using shelve.
-    # This creates a persistent dictionary-like database file.
-    with shelve.open('pq_index.db') as db:
+    # Save the PQ index in a persistent key–value store using shelve.
+    with shelve.open('Kmeans_pq_index.db') as db:
         for key, value in pq_index.items():
             db[str(key)] = value
-    print("PQ index saved to 'pq_index.db'.")
+    print("PQ index saved to 'Kmeans_pq_index.db'.")
