@@ -248,66 +248,96 @@ update_means_threaded(kmeans_config *config)
 kmeans_result
 kmeans(kmeans_config *config)
 {
-	int iterations = 0;
-	int *clusters_last;
-	size_t clusters_sz = sizeof(int)*config->num_objs;
+    int iterations = 0;
+    int *clusters_last;
+    size_t clusters_sz = sizeof(int) * config->num_objs;
+    int i;
+    const double CHANGE_THRESHOLD_PERCENT = 0;  /* 10% of points */
+    int change_threshold = (int)(CHANGE_THRESHOLD_PERCENT * config->num_objs);
+    int same_change_count = 0;    /* Count how many iterations have the same number of changes */
+    int prev_changes = -1;        /* Store number of changes from previous iteration */
 
-	assert(config);
-	assert(config->objs);
-	assert(config->num_objs);
-	assert(config->distance_method);
-	assert(config->centroid_method);
-	assert(config->centers);
-	assert(config->k);
-	assert(config->clusters);
-	assert(config->k <= config->num_objs);
+    assert(config);
+    assert(config->objs);
+    assert(config->num_objs);
+    assert(config->distance_method);
+    assert(config->centroid_method);
+    assert(config->centers);
+    assert(config->clusters);
+    assert(config->k);
+    assert(config->k <= config->num_objs);
 
-	/* Zero out cluster numbers, just in case user forgets */
-	memset(config->clusters, 0, clusters_sz);
+    /* Zero out cluster numbers */
+    memset(config->clusters, 0, clusters_sz);
 
-	/* Set default max iterations if necessary */
-	if (!config->max_iterations)
-		config->max_iterations = KMEANS_MAX_ITERATIONS;
+    if (!config->max_iterations)
+        config->max_iterations = KMEANS_MAX_ITERATIONS;
 
-	/*
-	 * Previous cluster state array. At this time, r doesn't mean anything
-	 * but it's ok
-	 */
-	clusters_last = kmeans_malloc(clusters_sz);
+    clusters_last = kmeans_malloc(clusters_sz);
+    if (!clusters_last) {
+        return KMEANS_ERROR;
+    }
 
-	while (1)
-	{
-		/* Store the previous state of the clustering */
-		memcpy(clusters_last, config->clusters, clusters_sz);
+    while (1)
+    {
+        memcpy(clusters_last, config->clusters, clusters_sz);
 
 #ifdef KMEANS_THREADED
-		update_r_threaded(config);
-		update_means_threaded(config);
+        update_r_threaded(config);
+        update_means_threaded(config);
 #else
-		update_r(config);
-		update_means(config);
+        update_r(config);
+        update_means(config);
 #endif
-		/*
-		 * if all the cluster numbers are unchanged since last time,
-		 * we are at a stable solution, so we can stop here
-		 */
-		if (memcmp(clusters_last, config->clusters, clusters_sz) == 0)
-		{
-			kmeans_free(clusters_last);
-			config->total_iterations = iterations;
-			return KMEANS_OK;
-		}
 
-		if (iterations++ > config->max_iterations)
-		{
-			kmeans_free(clusters_last);
-			config->total_iterations = iterations;
-			return KMEANS_EXCEEDED_MAX_ITERATIONS;
-		}
-	}
+        iterations++;
 
-	kmeans_free(clusters_last);
-	config->total_iterations = iterations;
-	return KMEANS_ERROR;
+        /* Count how many assignments changed */
+        int changes = 0;
+        for (i = 0; i < config->num_objs; i++) {
+            if (clusters_last[i] != config->clusters[i])
+                changes++;
+        }
+
+        /* Print progress every 10 iterations */
+        if (iterations % 10 == 0) {
+            printf("Iteration %d completed: %d changes\n", iterations, changes);
+            fflush(stdout);
+        }
+
+        /* Check for standard convergence if few changes */
+        if (changes <= change_threshold) {
+            kmeans_free(clusters_last);
+            config->total_iterations = iterations;
+            return KMEANS_OK;
+        }
+
+        /* Check if the number of changes has stayed the same over multiple iterations */
+        if (changes == prev_changes) {
+            same_change_count++;
+        } else {
+            same_change_count = 0;
+            prev_changes = changes;
+        }
+
+        /* If the changes are the same for, say, 5 consecutive iterations, break out */
+        if (same_change_count >= 20) {
+            printf("No improvement in changes over 20 iterations. Breaking out at iteration %d with %d changes.\n",
+                   iterations, changes);
+            fflush(stdout);
+            kmeans_free(clusters_last);
+            config->total_iterations = iterations;
+            return KMEANS_OK;
+        }
+
+        if (iterations > config->max_iterations) {
+            kmeans_free(clusters_last);
+            config->total_iterations = iterations;
+            return KMEANS_OK;
+        }
+    }
+
+    kmeans_free(clusters_last);
+    config->total_iterations = iterations;
+    return KMEANS_ERROR;
 }
-

@@ -49,7 +49,7 @@
 */
 #ifdef KMEANS_THREADED
 #define KMEANS_THR_MAX 16
-#define KMEANS_THR_THRESHOLD 250000
+#define KMEANS_THR_THRESHOLD 2500
 #endif
 
 #define kmeans_malloc(size) malloc(size)

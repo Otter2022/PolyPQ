@@ -5,8 +5,8 @@ import pickle  # For saving the codebook
 import shelve  # For creating a persistent key–value store
 import re
 import random
-import PolyPQ  # Our C-based k-means module
-from joblib import Parallel, delayed  # For parallel processing
+import argparse
+from sklearn.cluster import KMeans
 
 def sortFilesByIdData(files):
     """
@@ -88,7 +88,6 @@ def make_subvector_groups(sparse_vecs, m, d):
     return subvector_groups
 
 # --- Helper functions for medoid computation using Jaccard distance ---
-
 def jaccard_distance(a, b):
     """
     Computes the Jaccard distance between two binary vectors.
@@ -125,13 +124,41 @@ def compute_cluster_medoid(c, group_points, labels, initial_center):
         return compute_medoid(cluster_points)
     else:
         return initial_center
+    
+def jaccard_distance_dense(a, b):
+    """
+    Computes the Jaccard distance for dense binary vectors.
+    """
+    intersection = np.sum(np.logical_and(a, b))
+    union = np.sum(np.logical_or(a, b))
+    if union == 0:
+        return 0.0
+    similarity = intersection / union
+    return 1.0 - similarity
 
 if __name__ == "__main__":
-    # --- Configuration ---
-    data_path = "../data/tmp/shared/encoding/pk-50k0.002/"
-    d = 18382            # Dimensionality of the full vector
-    m = 14               # Number of subvectors/subspaces
-    num_clusters = 256   # Number of clusters per subspace
+    # --- Parse command-line arguments ---
+    parser = argparse.ArgumentParser(
+        description="Clustering using sklearn KMeans with unique vector initialization"
+    )
+    parser.add_argument("--data_path", type=str, default="../data/tmp/shared/encoding/pk-50k0.002/",
+                        help="Path to the folder containing the encoded files.")
+    parser.add_argument("--d", type=int, default=18382,
+                        help="Dimensionality of the full vector.")
+    parser.add_argument("--m", type=int, required=True,
+                        help="Number of subvectors/subspaces.")
+    parser.add_argument("--num_clusters", type=int, default=1024,
+                        help="Number of clusters per subspace.")
+    parser.add_argument("--codebook_out", type=str, default="Kmeans_codebook.pkl",
+                        help="Output file for the codebook (pickle file).")
+    parser.add_argument("--pq_index_out", type=str, default="Kmeans_pq_index.db",
+                        help="Output file for the PQ index (shelve database).")
+    args = parser.parse_args()
+
+    data_path = args.data_path
+    d = args.d
+    m = args.m
+    num_clusters = args.num_clusters
 
     # Exclude files with numbers >= 40000 in their name
     exclusion_regex = r'^.*_(?:[4-9]\d{4}|\d{6,}).*$'
@@ -143,10 +170,10 @@ if __name__ == "__main__":
     # Group subvectors by subspace (order is preserved)
     subvectors = make_subvector_groups(all_vector_str, m, d)
     print(f"Split vectors into {m} subvectors of size {d//m}.")
+    print("Example subvector:", subvectors[0][0])
 
-    # --- Build the codebook using PolyPQ.kmeans ---
-    # For each subspace, we will cluster the subvectors using our k-means implementation.
-    codebook = []       # List to hold the codebook for each subspace (medoids)
+    # --- Build the codebook using sklearn KMeans ---
+    codebook = []       # List to hold the codebook for each subspace (cluster centers)
     all_labels = []     # List to hold the cluster labels (assignments) for each subspace
 
     for group_index, subvector_group in enumerate(subvectors):
@@ -158,35 +185,40 @@ if __name__ == "__main__":
         current_clusters = num_clusters if num_points >= num_clusters else num_points
         if current_clusters != num_clusters:
             print(f"Group {group_index}: Reducing number of clusters to {current_clusters}")
-
-        # Randomly select initial centers from the group points
-        initial_centers = random.sample(group_points, current_clusters)
-
-        # Run k-means using the PolyPQ module with Jaccard distance
-        labels = PolyPQ.kmeans(group_points, initial_centers, max_iterations=999999, metric="jaccard")
+        
+        # Convert to a NumPy array for easier processing
+        dense_points = np.array(group_points)
+        
+        # Use unique points as initial centers.
+        unique_points = np.unique(dense_points, axis=0)
+        print(f"Group {group_index}: Found {len(unique_points)} unique points.")
+        
+        # If there are fewer unique points than desired, use them all.
+        if len(unique_points) < num_clusters:
+            print(f"Group {group_index}: Using all {len(unique_points)} unique points as initial centers.")
+            initial_centers = unique_points
+        else:
+            # Otherwise, take the first 'num_clusters' unique points.
+            initial_centers = unique_points[:num_clusters]
+        
+        # Use the number of unique initial centers as the number of clusters.
+        n_clusters = initial_centers.shape[0]
+        # Run sklearn's KMeans clustering.
+        kmeans = KMeans(n_clusters=n_clusters, init=initial_centers, max_iter=500, n_init=1, random_state=42)
+        labels = kmeans.fit_predict(dense_points)
         all_labels.append(labels)
-
+        centers = kmeans.cluster_centers_
         print("Created labels for group", group_index)
-        
-        # **** remove because slow ****
-        # --- Parallelized medoid computation for each cluster ---
-        # centers = Parallel(n_jobs=16)(
-        #     delayed(compute_cluster_medoid)(c, group_points, labels, initial_centers[c])
-        #     for c in range(current_clusters)
-        # )
-
-        centers = initial_centers
-        
         print(f"Group {group_index}: Found clusters: {np.unique(labels)}")
-        codebook.append(np.array(centers))
-
+        codebook.append(centers)
+    
     # Save the codebook (this can later be used for query processing)
-    with open("Kmeans_codebook.pkl", "wb") as f:
+    with open(args.codebook_out, "wb") as f:
         pickle.dump(codebook, f)
-    print("Codebook saved to 'Kmeans_codebook.pkl'.")
+    print(f"Codebook saved to '{args.codebook_out}'.")
 
-    # --- Build and save the PQ index ---
-    # For each original vector (order preserved), combine the cluster assignments from all m subspaces.
+    # --- (Optional) Build and save the PQ index ---
+    # For each original vector (order is preserved), combine the cluster assignments from all m subspaces.
     num_vectors = len(all_vector_str)
     pq_index = {}
     for i in range(num_vectors):
@@ -194,8 +226,7 @@ if __name__ == "__main__":
         code = tuple(all_labels[j][i] for j in range(m))
         pq_index[i] = code
 
-    # Save the PQ index in a persistent key–value store using shelve.
-    with shelve.open('Kmeans_pq_index.db') as db:
+    with shelve.open(args.pq_index_out) as db:
         for key, value in pq_index.items():
             db[str(key)] = value
-    print("PQ index saved to 'Kmeans_pq_index.db'.")
+    print(f"PQ index saved to '{args.pq_index_out}'.")

@@ -11,6 +11,36 @@ static int dim = 0;
 
 /* --- Distance functions --- */
 
+/* Weighted Jaccard distance function.
+   Assumes that each Pointer points to an array of doubles of length 'dim'.
+   The weighted Jaccard similarity is defined as:
+       similarity = sum(min(a_i, b_i)) / sum(max(a_i, b_i))
+   and the weighted Jaccard distance is:
+       distance = 1.0 - similarity
+*/
+double weighted_jaccard_distance(const Pointer a, const Pointer b) {
+    const double *p1 = (const double *) a;
+    const double *p2 = (const double *) b;
+    double min_sum = 0.0;
+    double max_sum = 0.0;
+    
+    for (int i = 0; i < dim; i++) {
+        double val1 = p1[i];
+        double val2 = p2[i];
+        /* Add the minimum and maximum for each dimension */
+        min_sum += (val1 < val2) ? val1 : val2;
+        max_sum += (val1 > val2) ? val1 : val2;
+    }
+    
+    /* If both vectors are zero vectors, define the distance as 0 */
+    if (max_sum == 0.0)
+        return 0.0;
+    
+    double similarity = min_sum / max_sum;
+    return 1.0 - similarity;
+}
+
+
 /* Euclidean distance function.
    Assumes that each Pointer points to an array of doubles of length 'dim'. */
 double euclidean_distance(const Pointer a, const Pointer b) {
@@ -22,6 +52,39 @@ double euclidean_distance(const Pointer a, const Pointer b) {
         sum += d * d;
     }
     return sqrt(sum);
+}
+
+void compute_centroid_with_reinit(const Pointer *objs, const int *clusters, size_t num_objs,
+    int cluster, Pointer centroid) {
+    double *cent = (double *) centroid;
+    int count = 0;
+    // Zero out the centroid.
+    for (int i = 0; i < dim; i++) {
+        cent[i] = 0.0;
+    }
+    // Sum all points assigned to this cluster.
+    for (size_t i = 0; i < num_objs; i++) {
+        if (clusters[i] == cluster) {
+            double *pt = (double *) objs[i];
+            for (int j = 0; j < dim; j++) {
+                cent[j] += pt[j];
+            }
+        count++;
+        }
+    }
+    if (count > 0) {
+    // Compute the mean.
+        for (int j = 0; j < dim; j++) {
+            cent[j] /= count;
+        }
+    } else {
+    // No points assigned: reinitialize with a random data point.
+        int random_index = rand() % num_objs;
+        double *pt = (double *) objs[random_index];
+        for (int j = 0; j < dim; j++) {
+            cent[j] = pt[j];
+        }
+    }
 }
 
 /* Jaccard distance function.
@@ -186,10 +249,12 @@ static PyObject * py_kmeans(PyObject *self, PyObject *args, PyObject *kwargs) {
     kmeans_config config;
     if (strcmp(metric, "jaccard") == 0) {
         config.distance_method = jaccard_distance;
+    } else if (strcmp(metric, "weighted_jaccard") == 0) {
+        config.distance_method = weighted_jaccard_distance;
     } else {
         config.distance_method = euclidean_distance;
     }
-    config.centroid_method = compute_centroid;
+    config.centroid_method = compute_centroid_with_reinit;
     config.objs = objs;
     config.num_objs = num_points;
     config.centers = centers;

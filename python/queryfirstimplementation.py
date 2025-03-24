@@ -192,14 +192,15 @@ if __name__ == "__main__":
         description="Evaluate recall for PQ-based approximate search using a given codebook and PQ index."
     )
     parser.add_argument("--k", type=int, default=250, help="The number of top results to return per query.")
+    parser.add_argument("--m", type=int, default=14, help="Number of subspaces (used during clustering).")
     parser.add_argument("--db_file", type=str, default="pq_index.db", help="Path to the shelve db file for the PQ index.")
     parser.add_argument("--codebook_file", type=str, default="codebook.pkl", help="Path to the pickle file containing the codebook.")
     args = parser.parse_args()
 
     # Parameters
     grid_size = 18382   # Dimensionality of the full vectors
-    m = 14              # Number of subspaces (as used during clustering)
-    k = args.k        # Number of neighbors to return (from command line)
+    m = args.m         # Number of subspaces (provided via command-line)
+    k = args.k         # Number of neighbors to return (from command line)
     gt_dir = "../data/pk-query-50k"  # Directory containing groundtruth files (CSV format)
     query_dir = "../data/tmp/shared/encoding/pk-50k0.002"  # Directory containing query vector files
 
