@@ -15,24 +15,25 @@ from sklearn_extra.cluster import KMedoids
 @njit
 def weighted_jaccard_distance(a, b):
     """
-    Compute the Jaccard distance between two boolean vectors.
-    For two boolean vectors a and b, the Jaccard similarity is defined as:
-      similarity = (number of positions where both a and b are True) / 
-                   (number of positions where at least one is True)
-    The distance is then defined as 1 - similarity.
+    Compute the weighted Jaccard distance between two vectors.
+    For two vectors a and b, the weighted Jaccard similarity is defined as:
+      similarity = sum(min(a, b)) / sum(max(a, b))
+    The distance is then 1 - similarity.
     """
-    intersection = 0.0
-    union = 0.0
+    min_val = 0.0
+    max_val = 0.0
     for i in range(len(a)):
-        # If either value is True, count it in the union.
-        if a[i] or b[i]:
-            union += 1.0
-            # If both are True, count it in the intersection.
-            if a[i] and b[i]:
-                intersection += 1.0
-    if union == 0:
-        return 0.0  # Both vectors are entirely False.
-    return 1.0 - (intersection / union)
+        ai = a[i]
+        bi = b[i]
+        if ai < bi:
+            min_val += ai
+            max_val += bi
+        else:
+            min_val += bi
+            max_val += ai
+    if max_val == 0:
+        return 0.0
+    return 1 - (min_val / max_val)
 
 def sortFilesByIdData(files):
     """
@@ -152,24 +153,23 @@ if __name__ == "__main__":
 
     for group_index, subvector_group in enumerate(subvectors):
         # Convert each subvector to a list of floats.
-        group_points = [list(map(bool, vec)) for vec in subvector_group]
+        group_points = [np.array(np.array(subvector).astype(bool)) for subvector in subvector_group]
         num_points = len(group_points)
         
         # Run k-medoids clustering using scikit-learn-extra.
-        kmedoids = KMedoids(
+        kmeans = KMeans(
             n_clusters=num_clusters, 
-            metric='jaccard', 
-            init='k-medoids++',
+            init='k-means++',
             random_state=0
         )
-        kmedoids.fit(group_points)
-        labels = kmedoids.labels_.tolist()
+        kmeans.fit(group_points)
+        labels = kmeans.labels_.tolist()
         all_labels.append(labels)
         print("Created labels for group", group_index)
         
         # Instead of computing medoids from scratch, use the first current_clusters unique points as the codebook.
         # (Alternatively, you could use kmedoids.cluster_centers_ if that fits your needs.)
-        codebook_group = kmedoids.cluster_centers_
+        codebook_group = kmeans.cluster_centers_
         codebook.append(np.array(codebook_group))
         print(f"Group {group_index}: Codebook (candidate centers) has shape {codebook_group.shape}")
     

@@ -12,3 +12,7 @@ python/*.pkl
 python/*.txt
 python/*.png
 .DS_Store
+*.bak
+*.swp
+*.dat
+*.dir
