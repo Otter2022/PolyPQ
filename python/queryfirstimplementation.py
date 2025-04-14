@@ -10,6 +10,29 @@ import time  # For timing queries
 
 # ---------- Helper Functions ----------
 
+@njit
+def weighted_jaccard_distance(a, b):
+    """
+    Compute the weighted Jaccard distance between two vectors.
+    For two vectors a and b, the weighted Jaccard similarity is defined as:
+      similarity = sum(min(a, b)) / sum(max(a, b))
+    The distance is then 1 - similarity.
+    """
+    min_val = 0.0
+    max_val = 0.0
+    for i in range(len(a)):
+        ai = a[i]
+        bi = b[i]
+        if ai < bi:
+            min_val += ai
+            max_val += bi
+        else:
+            min_val += bi
+            max_val += ai
+    if max_val == 0:
+        return 0.0
+    return 1 - (min_val / max_val)
+
 def readEncodeFile(filepath):
     """
     Reads a file containing encoded sparse vectors.
@@ -111,7 +134,7 @@ def query_database(query_vector, codebook, pq_index, grid_size, m, k=10, metric=
 
 # ---------- Evaluation Function ----------
 
-def evaluate_recall_from_gt_dir(gt_dir, query_file, codebook, pq_index, grid_size, m, k=10, metric='jaccard', query_offset=0):
+def evaluate_recall_from_gt_dir(gt_dir, query_file, codebook, pq_index, grid_size, m, k=10, metric='jaccard', query_offset=0, low_range=0, top_range=50000):
     """
     Given a directory of groundtruth files and a query file, this function:
       1. Loads and merges all groundtruth data (mapping query_id to a set of true neighbor IDs).
@@ -147,7 +170,7 @@ def evaluate_recall_from_gt_dir(gt_dir, query_file, codebook, pq_index, grid_siz
         if query_id in groundtruth:
             gt_neighbors = groundtruth[query_id]
             if len(gt_neighbors) > 0:
-                recall = len(gt_neighbors & retrieved_set) / float(len(gt_neighbors))
+                recall = len(gt_neighbors & retrieved_set) / float(len([n for n in gt_neighbors if low_range < n < top_range]))
                 recall_values.append(recall)
                 total_recall += recall
                 valid_queries += 1
@@ -198,11 +221,11 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     # Parameters
-    grid_size = 18382   # Dimensionality of the full vectors
+    grid_size = 21609   # Dimensionality of the full vectors
     m = args.m         # Number of subspaces (provided via command-line)
     k = args.k         # Number of neighbors to return (from command line)
-    gt_dir = "../data/pk-query-50k"  # Directory containing groundtruth files (CSV format)
-    query_dir = "../data/tmp/shared/encoding/pk-50k0.002"  # Directory containing query vector files
+    gt_dir = "../../../warehouse/pk-fil_5e-06-5e-05"  # Directory containing groundtruth files (CSV format)
+    query_dir = "../../../uni_filtered_pk-5e-06-5e-05-147-147"  # Directory containing query vector files
 
     # Load the PQ codebook (list of m arrays) from file.
     with open(args.codebook_file, "rb") as f:
@@ -223,10 +246,11 @@ if __name__ == "__main__":
     for i in os.listdir(query_dir):
         # Extract starting index from the filename (assumes a number is present)
         starting_index = re.findall(r'\d+', i)[0]
-        if int(starting_index) >= 40000:
+        if int(starting_index) >= 24915:
             query_file = os.path.join(query_dir, i)
             rec_total, valid_queries, _recall_values, query_time = evaluate_recall_from_gt_dir(
-                gt_dir, query_file, codebook, pq_index, grid_size, m, k=k, metric='jaccard', query_offset=int(starting_index)
+                gt_dir, query_file, codebook, pq_index, grid_size, m, k=k, metric=weighted_jaccard_distance, query_offset=int(starting_index),
+                low_range=0, top_range=10000
             )
             count += valid_queries
             recall_sum += rec_total

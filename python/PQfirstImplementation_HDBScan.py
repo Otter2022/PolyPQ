@@ -5,6 +5,35 @@ import shelve  # For creating a persistent key–value store
 import re
 import random
 import argparse
+from sklearn.cluster import KMeans
+from numba import njit
+from scipy.spatial.distance import jaccard
+
+# Import KMedoids from scikit-learn-extra
+from sklearn_extra.cluster import KMedoids
+
+@njit
+def weighted_jaccard_distance(a, b):
+    """
+    Compute the weighted Jaccard distance between two vectors.
+    For two vectors a and b, the weighted Jaccard similarity is defined as:
+      similarity = sum(min(a, b)) / sum(max(a, b))
+    The distance is then 1 - similarity.
+    """
+    min_val = 0.0
+    max_val = 0.0
+    for i in range(len(a)):
+        ai = a[i]
+        bi = b[i]
+        if ai < bi:
+            min_val += ai
+            max_val += bi
+        else:
+            min_val += bi
+            max_val += ai
+    if max_val == 0:
+        return 0.0
+    return 1 - (min_val / max_val)
 
 def sortFilesByIdData(files):
     """
@@ -90,7 +119,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Clustering using scikit-learn-extra's KMedoids with a weighted Jaccard metric"
     )
-    parser.add_argument("--data_path", type=str, default="../data/tmp/shared/encoding/pk-50k0.002/",
+    parser.add_argument("--data_path", type=str, default="../../../uni_filtered_pk-5e-06-5e-05-147-147",
                         help="Path to the folder containing the encoded files.")
     parser.add_argument("--d", type=int, default=21609,
                         help="Dimensionality of the full vector.")
@@ -109,8 +138,7 @@ if __name__ == "__main__":
     m = args.m
     num_clusters = args.num_clusters
 
-    # Exclude files with numbers >= 40000 in their name.
-    exclusion_regex = r'^.*_(?:[4-9]\d{4}|\d{6,}).*$'
+    exclusion_regex = r'^.*_(?:[1-9][0-9]\d{3}).*$'
     
     all_vector_str = readAllSparseStr(data_path, exclusion_regex=exclusion_regex)
     print(f"Read {len(all_vector_str)} sparse vectors.")
@@ -122,32 +150,27 @@ if __name__ == "__main__":
     # Build the codebook and PQ index using k-medoids clustering.
     codebook = []       # Will store one codebook per subspace (using candidate centers)
     all_labels = []     # Holds the cluster assignments for each subspace
-    
 
     for group_index, subvector_group in enumerate(subvectors):
         # Convert each subvector to a list of floats.
-        group_points = [list(map(bool, vec)) for vec in subvector_group]
+        group_points = [np.array(np.array(subvector).astype(bool)) for subvector in subvector_group]
         num_points = len(group_points)
-        current_clusters = num_clusters if num_points >= num_clusters else num_points
-        if current_clusters != num_clusters:
-            print(f"Group {group_index}: Reducing number of clusters to {current_clusters}")
         
-        dense_points = np.array(group_points)
-        unique_points = np.unique(dense_points, axis=0)
-        print(f"Group {group_index}: Found {len(unique_points)} unique points.")
-        if len(unique_points) < current_clusters:
-            print(f"Group {group_index}: Using all {len(unique_points)} unique points as candidates.")
-        
-        # Run k-medoids clustering.
-        # The function returns a list of cluster labels.
-        labels = pykmedoidsmodule.kmedoids(group_points, current_clusters, metric="weighted_jaccard")
+        # Run k-medoids clustering using scikit-learn-extra.
+        kmeans = KMeans(
+            n_clusters=num_clusters, 
+            init='k-means++',
+            random_state=0
+        )
+        kmeans.fit(group_points)
+        labels = kmeans.labels_.tolist()
         all_labels.append(labels)
         print("Created labels for group", group_index)
         
-        # Instead of computing medoids, use the first current_clusters unique points as the codebook.
-        codebook_group = unique_points[:current_clusters]
+        # Instead of computing medoids from scratch, use the first current_clusters unique points as the codebook.
+        # (Alternatively, you could use kmedoids.cluster_centers_ if that fits your needs.)
+        codebook_group = kmeans.cluster_centers_
         codebook.append(np.array(codebook_group))
-        print(codebook)
         print(f"Group {group_index}: Codebook (candidate centers) has shape {codebook_group.shape}")
     
     # Save the codebook for later use.
