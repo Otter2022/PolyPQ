@@ -12,3 +12,5 @@ python/*.pkl
 python/*.txt
 python/*.png
 .DS_Store
+data
+refactored_proj/siftoutputs
