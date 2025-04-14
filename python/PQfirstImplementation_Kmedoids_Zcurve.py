@@ -15,27 +15,32 @@ sys.modules['dbm'] = dbm.dumb
 # Import KMedoids from scikit-learn-extra
 from sklearn_extra.cluster import KMedoids
 
-# @njit
-# def weighted_jaccard_distance(a, b):
-#     """
-#     Compute the Jaccard distance between two boolean vectors.
-#     For two boolean vectors a and b, the Jaccard similarity is defined as:
-#       similarity = (number of positions where both a and b are True) / 
-#                    (number of positions where at least one is True)
-#     The distance is then defined as 1 - similarity.
-#     """
-#     intersection = 0.0
-#     union = 0.0
-#     for i in range(len(a)):
-#         # If either value is True, count it in the union.
-#         if a[i] or b[i]:
-#             union += 1.0
-#             # If both are True, count it in the intersection.
-#             if a[i] and b[i]:
-#                 intersection += 1.0
-#     if union == 0:
-#         return 0.0  # Both vectors are entirely False.
-#     return 1.0 - (intersection / union)
+# --- Z-curve (Morton order) helper functions ---
+def interleave_bits(x, y):
+    """
+    Interleaves the bits of x and y.
+    Returns the Morton code for the coordinate (x, y).
+    """
+    z = 0
+    max_bits = max(x.bit_length(), y.bit_length())
+    for i in range(max_bits):
+        z |= ((x >> i) & 1) << (2 * i)
+        z |= ((y >> i) & 1) << (2 * i + 1)
+    return z
+
+def get_zorder_indices(rows, cols):
+    """
+    Returns a list of indices (0 ... rows*cols - 1) corresponding to the Z-curve (Morton order)
+    of a grid with the given dimensions.
+    """
+    indices = []
+    for r in range(rows):
+        for c in range(cols):
+            morton = interleave_bits(r, c)
+            index = r * cols + c
+            indices.append((morton, index))
+    indices.sort(key=lambda x: x[0])
+    return [idx for (_, idx) in indices]
 
 def sortFilesByIdData(files):
     """
@@ -61,7 +66,6 @@ def readEncodeFile(filepath):
     for ind, line in enumerate(lines):
         if ',' in line:
             lines[ind] = line.replace(',', '')
-
     return [line.strip() for line in lines if line.strip()]
 
 def readAllSparseStr(path, exclusion_regex=None):
@@ -100,6 +104,9 @@ def split_into_subvectors(dense_vec, subvector_size):
 def make_subvector_groups(sparse_vecs, m, d):
     """
     Splits each sparse vector into subvectors and groups them by subspace.
+    First, each sparse vector is reconstructed into a dense vector.
+    If d is a perfect square, the dense vector is reordered using Z-curve (Morton order)
+    before being split into m subvectors.
     Returns a list of m groups, where each group is a list of subvectors.
     The order of vectors is preserved.
     """
@@ -107,6 +114,15 @@ def make_subvector_groups(sparse_vecs, m, d):
     for vec_str in sparse_vecs:
         dense_vec = reconstruct_dense_vector(vec_str, d)
         dense_vecs.append(dense_vec)
+    
+    # If d is a perfect square, reorder each dense vector using Z-curve.
+    side = int(np.sqrt(d))
+    if side * side == d:
+        z_indices = get_zorder_indices(side, side)
+        dense_vecs = [[vec[i] for i in z_indices] for vec in dense_vecs]
+    else:
+        print("Warning: grid size is not a perfect square, Z-curve ordering skipped.")
+    
     subvector_size = len(dense_vecs[0]) // m
     if len(dense_vecs[0]) % m != 0:
         raise ValueError("The dense vector length is not divisible by the number of subvectors (m).")
@@ -145,7 +161,7 @@ if __name__ == "__main__":
     all_vector_str = readAllSparseStr(data_path, exclusion_regex=exclusion_regex)
     print(f"Read {len(all_vector_str)} sparse vectors.")
 
-    # Group subvectors by subspace.
+    # Group subvectors by subspace (with Z-curve reordering if possible).
     subvectors = make_subvector_groups(all_vector_str, m, d)
     print(f"Split vectors into {m} subvectors of size {d//m}.")
 
@@ -154,7 +170,7 @@ if __name__ == "__main__":
     all_labels = []     # Holds the cluster assignments for each subspace
 
     for group_index, subvector_group in enumerate(subvectors):
-        # Convert each subvector to a list of floats.
+        # Convert each subvector to a list of booleans.
         group_points = [list(map(bool, vec)) for vec in subvector_group]
         num_points = len(group_points)
         
@@ -170,8 +186,7 @@ if __name__ == "__main__":
         all_labels.append(labels)
         print("Created labels for group", group_index)
         
-        # Instead of computing medoids from scratch, use the first current_clusters unique points as the codebook.
-        # (Alternatively, you could use kmedoids.cluster_centers_ if that fits your needs.)
+        # Use the cluster centers as the codebook for this subspace.
         codebook_group = kmedoids.cluster_centers_
         codebook.append(np.array(codebook_group))
         print(f"Group {group_index}: Codebook (candidate centers) has shape {codebook_group.shape}")

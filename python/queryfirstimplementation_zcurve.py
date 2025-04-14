@@ -7,6 +7,35 @@ import re
 import matplotlib.pyplot as plt
 import argparse
 import time  # For timing queries
+import dbm.dumb
+import sys
+sys.modules['dbm'] = dbm.dumb
+
+# ---------- Z-curve Helper Functions ----------
+def interleave_bits(x, y):
+    """
+    Interleaves the bits of x and y to produce a Morton code for the coordinate (x, y).
+    """
+    z = 0
+    max_bits = max(x.bit_length(), y.bit_length())
+    for i in range(max_bits):
+        z |= ((x >> i) & 1) << (2 * i)
+        z |= ((y >> i) & 1) << (2 * i + 1)
+    return z
+
+def get_zorder_indices(rows, cols):
+    """
+    Computes the Z-curve (Morton order) for a grid with given rows and cols.
+    Returns a list of indices (0 ... rows*cols - 1) sorted by their Morton code.
+    """
+    indices = []
+    for r in range(rows):
+        for c in range(cols):
+            morton = interleave_bits(r, c)
+            index = r * cols + c
+            indices.append((morton, index))
+    indices.sort(key=lambda x: x[0])
+    return [idx for (_, idx) in indices]
 
 # ---------- Helper Functions ----------
 def readEncodeFile(filepath):
@@ -15,14 +44,11 @@ def readEncodeFile(filepath):
     Each line corresponds to a vector (as a space-separated string of indices).
     """
     lines = []
-
     with open(filepath, 'r') as f:
-        
         for i, l in enumerate(f):
             line = l.replace(",", "").strip()
             if line:
                 lines.append(line)
-
     return lines
 
 def reconstruct_dense_vector(vec_str, grid_size):
@@ -82,48 +108,14 @@ def jaccard_distance(a, b):
     union = np.sum(a_bool | b_bool)
     return 1 - (inter / union) if union != 0 else 1
 
-# def query_database(query_vector, codebook, pq_index, grid_size, m, k=10, metric='jaccard'):
-#     """
-#     Given a query vector, splits it into m subvectors and builds a lookup table
-#     of distances between the query subvector and all centers in each subspace.
-#     Then, for each database vector (represented by its PQ code in pq_index),
-#     it sums the corresponding lookup distances to compute an approximate distance.
-#     Returns the top-k database vector indices (keys) and their approximate distances.
-#     """
-#     subvector_size = grid_size // m
-#     query_distance_table = np.array(query_distance_table, dtype=object)
-
-#     for i in range(m):
-#         subquery = query_vector[i*subvector_size:(i+1)*subvector_size]
-#         centers = codebook[i]
-#         if metric == 'jaccard':
-#             distances = np.array([jaccard_distance(subquery, center) for center in centers])
-#         else:
-#             distances = np.linalg.norm(centers - subquery, axis=1)
-#         query_distance_table.append(distances)
-#     query_distance_table = np.array(query_distance_table)  # shape: (m, n_clusters)
-
-#     db_keys = list(pq_index.keys())
-#     approx_distances = []
-#     for key in db_keys:
-#         code = pq_index[key]  # a tuple/list of length m
-#         d = 0.0
-#         for i in range(m):
-#             d += query_distance_table[i, code[i]]
-#         approx_distances.append(d)
-#     approx_distances = np.array(approx_distances)
-#     sorted_indices = np.argsort(approx_distances)
-#     top_keys = [db_keys[i] for i in sorted_indices[:k]]
-#     top_distances = approx_distances[sorted_indices[:k]]
-#     return top_keys, top_distances
-
+# ---------- Query Function with Z-curve Reordering ----------
 def query_database(query_vector, codebook, pq_index, grid_size, m, k=10, metric='jaccard'):
     """
-    For each subspace, compute the lookup table of distances between the query subvector
-    and all centers in that subspace. Instead of converting the list to a homogeneous NumPy array,
-    we keep it as a list so that each subspace can have a different number of centers.
-    Then, for each database vector (represented by its PQ code in pq_index), we sum the corresponding
-    lookup distances to compute an approximate distance.
+    Given a query vector, first reorders it using a Z-curve (if the vector length is a perfect square).
+    Then, splits the (possibly reordered) query vector into m subvectors and builds a lookup table
+    of distances between each query subvector and all centers in that subspace.
+    For each database vector (represented by its PQ code in pq_index), the corresponding lookup
+    distances are summed to compute an approximate distance.
     
     Parameters:
       query_vector : numpy array or list
@@ -139,7 +131,7 @@ def query_database(query_vector, codebook, pq_index, grid_size, m, k=10, metric=
       k : int, optional
           Number of top results to return.
       metric : str, optional
-          Distance metric to use ('jaccard' or other metric using Euclidean norm).
+          Distance metric to use ('jaccard' or another metric).
           
     Returns:
       top_keys : list
@@ -147,21 +139,26 @@ def query_database(query_vector, codebook, pq_index, grid_size, m, k=10, metric=
       top_distances : numpy array
           The corresponding approximate distances.
     """
+    # If grid_size is a perfect square, reorder the query vector using Z-curve ordering.
+    side = int(np.sqrt(grid_size))
+    if side * side == grid_size:
+        z_indices = np.array(get_zorder_indices(side, side))
+        query_vector = query_vector[z_indices]
+    
     subvector_size = grid_size // m
     query_distance_table = []
     
     for i in range(m):
-        # Extract the subquery for this subspace
+        # Extract the subquery for this subspace.
         subquery = query_vector[i * subvector_size : (i + 1) * subvector_size]
         centers = codebook[i]
         if metric == 'jaccard':
             distances = np.array([jaccard_distance(subquery, center) for center in centers])
         else:
             distances = np.linalg.norm(centers - subquery, axis=1)
-        # Append the distances array for subspace i (it can have a variable length)
+        # Append the distances array for subspace i (variable length allowed).
         query_distance_table.append(distances)
     
-    # Do not convert to a single numpy array because the subspaces have different sizes.
     db_keys = list(pq_index.keys())
     approx_distances = []
     
@@ -170,7 +167,6 @@ def query_database(query_vector, codebook, pq_index, grid_size, m, k=10, metric=
         code = pq_index[key]  # A tuple/list of length m with the cluster assignment per subspace.
         d = 0.0
         for i in range(m):
-            # Instead of query_distance_table[i, code[i]], we index the list element.
             d += query_distance_table[i][code[i]]
         approx_distances.append(d)
     
@@ -245,11 +241,9 @@ def plot_recall_distribution(recall_values, k):
     """
     cnt = 0
     filename = f"recall_distribution_{k}().png"
-
     while filename in os.listdir():
         cnt += 1
         filename = f"recall_distribution_{k}({cnt}).png"
-
     plt.figure(figsize=(8, 6))
     plt.hist(recall_values, bins=20, edgecolor='black', alpha=0.7)
     plt.xlabel(f"Recall@{k}")

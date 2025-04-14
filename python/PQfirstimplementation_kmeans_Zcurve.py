@@ -7,6 +7,7 @@ import re
 import random
 import argparse
 from sklearn.cluster import KMeans
+
 import dbm.dumb
 import sys
 sys.modules['dbm'] = dbm.dumb
@@ -35,7 +36,6 @@ def readEncodeFile(filepath):
     for ind, line in enumerate(lines):
         if ',' in line:
             lines[ind] = line.replace(',', '')
-
     return [line.strip() for line in lines if line.strip()]
 
 def readAllSparseStr(path, exclusion_regex=None):
@@ -44,10 +44,8 @@ def readAllSparseStr(path, exclusion_regex=None):
     """
     files = os.listdir(path)
     files = sortFilesByIdData(files)
-
     if exclusion_regex:
         files = [f for f in files if not re.match(exclusion_regex, f)]
-    
     vector_str = []
     for file in files:
         full_path = os.path.join(path, file)
@@ -72,9 +70,41 @@ def split_into_subvectors(dense_vec, subvector_size):
     """
     return [dense_vec[i:i+subvector_size] for i in range(0, len(dense_vec), subvector_size)]
 
+# --- Z-curve (Morton order) helper functions ---
+def interleave_bits(x, y):
+    """
+    Interleaves the bits of x and y.
+    Returns the Morton code for the coordinate (x, y).
+    """
+    z = 0
+    max_bits = max(x.bit_length(), y.bit_length())
+    for i in range(max_bits):
+        z |= ((x >> i) & 1) << (2 * i)
+        z |= ((y >> i) & 1) << (2 * i + 1)
+    return z
+
+def get_zorder_indices(rows, cols):
+    """
+    Returns a list of indices (0 ... rows*cols - 1) corresponding to the Z-curve (Morton order)
+    of a grid with the given dimensions.
+    """
+    indices = []
+    for r in range(rows):
+        for c in range(cols):
+            morton = interleave_bits(r, c)
+            index = r * cols + c
+            indices.append((morton, index))
+    # Sort by the computed Morton code
+    indices.sort(key=lambda x: x[0])
+    return [idx for (_, idx) in indices]
+
 def make_subvector_groups(sparse_vecs, m, d):
     """
     Splits each sparse vector into subvectors and groups them by subspace.
+    First, each sparse vector is reconstructed into a dense vector.
+    If possible, the vector is then reordered using Z-curve (Morton order) assuming the vector
+    represents a square grid. Finally, the reordered vector is split into m subvectors.
+    
     Returns a list of m groups, where each group is a list of subvectors.
     The order of vectors is preserved.
     """
@@ -83,8 +113,17 @@ def make_subvector_groups(sparse_vecs, m, d):
         dense_vec = reconstruct_dense_vector(vec_str, d)
         dense_vecs.append(dense_vec)
 
-    subvector_size = len(dense_vecs[0]) // m
-    if len(dense_vecs[0]) % m != 0:
+    # If d is a perfect square, reorder each dense vector using Z-curve order.
+    side = int(np.sqrt(d))
+    if side * side == d:
+        z_indices = get_zorder_indices(side, side)
+        # Reorder each dense vector based on z_indices.
+        dense_vecs = [[vec[i] for i in z_indices] for vec in dense_vecs]
+    else:
+        print("Warning: grid size is not a perfect square, Z-curve ordering skipped.")
+
+    subvector_size = d // m
+    if d % m != 0:
         raise ValueError("The dense vector length is not divisible by the number of subvectors (m).")
 
     # Create m empty groups
