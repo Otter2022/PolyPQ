@@ -1,0 +1,5 @@
+Loaded query vectors, shape: (10000, 128)
+Loaded database codes, shape: (1000000, 16)
+Loaded 16 codebooks.
+Loaded groundtruth, shape: (10000, 100)
+Recall@100 (adc with adc_metric=l2): 0.9713

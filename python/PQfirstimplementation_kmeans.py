@@ -1,41 +1,24 @@
 import os
 import numpy as np
-import matplotlib.pyplot as plt
 import pickle  # For saving the codebook
 import shelve  # For creating a persistent key–value store
-import re
-import random
 import argparse
 from sklearn.cluster import KMeans
 import dbm.dumb
 import sys
 sys.modules['dbm'] = dbm.dumb
 
-def sortFilesByIdData(files):
-    """
-    Sorts files based on the numeric part of their names.
-    For example, a filename like 'weightint_47000.txt' will be sorted by 47000.
-    """
-    def extract_id(filename):
-        base = os.path.splitext(filename)[0]
-        try:
-            return int(base.split('_')[1])
-        except (IndexError, ValueError):
-            return 0
-    return sorted(files, key=extract_id)
 
-def readEncodeFile(filepath):
+def read_fvecs(filename):
     """
-    Reads a file containing encoded sparse vectors.
-    Each line corresponds to a vector represented as a string.
+    Reads a .fvecs file into a numpy array of shape (num_vectors, dimension).
+    The file format:
+      - Each vector is stored as: [d, component_1, component_2, ..., component_d]
+      - The first 4 bytes (an int32 in little-endian) specify the vector dimension d.
+      - The next d*4 bytes are float32 values (little-endian) for the vector components.
     """
     with open(filepath, 'r') as f:
         lines = f.readlines()
-
-    for ind, line in enumerate(lines):
-        if ',' in line:
-            lines[ind] = line.replace(',', '')
-
     return [line.strip() for line in lines if line.strip()]
 
 def readAllSparseStr(path, exclusion_regex=None):
@@ -66,96 +49,34 @@ def reconstruct_dense_vector(vec_str, grid_size):
             dense_vec[int(idx)] = 1
     return dense_vec
 
-def split_into_subvectors(dense_vec, subvector_size):
+def split_into_subvectors(vectors, m):
     """
-    Splits a dense vector into subvectors of the given size.
-    """
-    return [dense_vec[i:i+subvector_size] for i in range(0, len(dense_vec), subvector_size)]
-
-def make_subvector_groups(sparse_vecs, m, d):
-    """
-    Splits each sparse vector into subvectors and groups them by subspace.
-    Returns a list of m groups, where each group is a list of subvectors.
-    The order of vectors is preserved.
-    """
-    dense_vecs = []
-    for vec_str in sparse_vecs:
-        dense_vec = reconstruct_dense_vector(vec_str, d)
-        dense_vecs.append(dense_vec)
-
-    subvector_size = len(dense_vecs[0]) // m
-    if len(dense_vecs[0]) % m != 0:
-        raise ValueError("The dense vector length is not divisible by the number of subvectors (m).")
-
-    # Create m empty groups
-    subvector_groups = [[] for _ in range(m)]
-    for vec in dense_vecs:
-        subvectors = split_into_subvectors(vec, subvector_size)
-        for j in range(m):
-            subvector_groups[j].append(subvectors[j])
-    return subvector_groups
-
-# --- Helper functions for medoid computation using Jaccard distance ---
-def jaccard_distance(a, b):
-    """
-    Computes the Jaccard distance between two binary vectors.
-    """
-    a = np.array(a)
-    b = np.array(b)
-    inter = np.sum((a != 0) & (b != 0))
-    union = np.sum((a != 0) | (b != 0))
-    return 1 - (inter / union) if union != 0 else 1
-
-def compute_medoid(points):
-    """
-    Computes the medoid of a list of points (each a list of numbers) based on Jaccard distance.
-    Returns the point with the minimal total distance to all other points.
-    """
-    if not points:
-        return None
-    best_point = points[0]
-    best_total = float('inf')
-    for p in points:
-        total = sum(jaccard_distance(p, q) for q in points)
-        if total < best_total:
-            best_total = total
-            best_point = p
-    return best_point
-
-def compute_cluster_medoid(c, group_points, labels, initial_center):
-    """
-    Computes the medoid for cluster 'c' from group_points given the cluster assignments in labels.
-    If no points are assigned to the cluster, returns the initial_center.
-    """
-    cluster_points = [pt for pt, lab in zip(group_points, labels) if lab == c]
-    if cluster_points:
-        return compute_medoid(cluster_points)
-    else:
-        return initial_center
+    Splits a 2D numpy array of vectors (shape: num_vectors x d) into m subspaces.
+    Each subvector will have size d_sub = d // m.
     
-def jaccard_distance_dense(a, b):
+    Returns:
+        List of m arrays, each of shape (num_vectors, d_sub).
     """
-    Computes the Jaccard distance for dense binary vectors.
-    """
-    intersection = np.sum(np.logical_and(a, b))
-    union = np.sum(np.logical_or(a, b))
-    if union == 0:
-        return 0.0
-    similarity = intersection / union
-    return 1.0 - similarity
+    num_vectors, d = vectors.shape
+    if d % m != 0:
+        raise ValueError("Vector dimension must be divisible by m.")
+    subvector_size = d // m
+    subvectors = []
+    for i in range(m):
+        subvectors.append(vectors[:, i * subvector_size : (i+1) * subvector_size])
+    return subvectors
 
-if __name__ == "__main__":
-    # --- Parse command-line arguments ---
+def main():
     parser = argparse.ArgumentParser(
-        description="Clustering using sklearn KMeans with unique vector initialization"
+        description="Product Quantization using .fvecs vectors and KMeans clustering"
     )
-    parser.add_argument("--data_path", type=str, default="../../../uni_filtered_pk-5e-06-5e-05-147-147",
+    parser.add_argument("--data_path", type=str, default="../data/tmp/shared/encoding/pk-50k0.002/",
                         help="Path to the folder containing the encoded files.")
-    parser.add_argument("--d", type=int, default=21609,
+    parser.add_argument("--d", type=int, default=18382,
                         help="Dimensionality of the full vector.")
     parser.add_argument("--m", type=int, required=True,
                         help="Number of subvectors/subspaces.")
-    parser.add_argument("--num_clusters", type=int, default=1024,
+    parser.add_argument("--num_clusters", type=int, default=512,
                         help="Number of clusters per subspace.")
     parser.add_argument("--codebook_out", type=str, default="Kmeans_codebook.pkl",
                         help="Output file for the codebook (pickle file).")
@@ -169,72 +90,66 @@ if __name__ == "__main__":
     num_clusters = args.num_clusters
 
     # Exclude files with numbers >= 40000 in their name
-    exclusion_regex = r'^.*_(?:[1-9][0-9]\d{3}).*$'
+    exclusion_regex = r'^.*_(?:[4-9]\d{4}|\d{6,}).*$'
     
     # --- Read and process vectors ---
     all_vector_str = readAllSparseStr(data_path, exclusion_regex=exclusion_regex)
     print(f"Read {len(all_vector_str)} sparse vectors.")
 
-    # Group subvectors by subspace (order is preserved)
-    subvectors = make_subvector_groups(all_vector_str, m, d)
-    print(f"Split vectors into {m} subvectors of size {d//m}.")
-    print("Example subvector:", subvectors[0][0])
+    # --- Split vectors into m subspaces ---
+    subvectors = split_into_subvectors(all_vectors, args.m)
+    subvector_size = args.d // args.m
+    print(f"Split vectors into {args.m} subspaces, each of size {subvector_size}.")
 
     # --- Build the codebook using sklearn KMeans ---
-    codebook = []       # List to hold the codebook for each subspace (cluster centers)
-    all_labels = []     # List to hold the cluster labels (assignments) for each subspace
+    codebook = []       # To store the cluster centers for each subspace
+    all_labels = []     # To store the cluster assignments for each subspace
 
     for group_index, subvector_group in enumerate(subvectors):
-        # Convert each subvector to a list of floats
-        group_points = [list(map(float, vec)) for vec in subvector_group]
-        num_points = len(group_points)
+        # Convert the subspace data to float32 (if not already)
+        dense_points = subvector_group.astype(np.float32)
+        num_points = dense_points.shape[0]
         
-        # Adjust the number of clusters if needed
-        current_clusters = num_clusters if num_points >= num_clusters else num_points
-        if current_clusters != num_clusters:
-            print(f"Group {group_index}: Reducing number of clusters to {current_clusters}")
+        # Adjust the number of clusters if there are fewer points than desired
+        current_clusters = args.num_clusters if num_points >= args.num_clusters else num_points
+        if current_clusters != args.num_clusters:
+            print(f"Subspace {group_index}: Reducing number of clusters to {current_clusters}")
         
-        # Convert to a NumPy array for easier processing
-        dense_points = np.array(group_points)
-        
-        # Use unique points as initial centers.
+        # Use unique points as initial centers if possible.
         unique_points = np.unique(dense_points, axis=0)
-        print(f"Group {group_index}: Found {len(unique_points)} unique points.")
-        
-        # If there are fewer unique points than desired, use them all.
-        if len(unique_points) < num_clusters:
-            print(f"Group {group_index}: Using all {len(unique_points)} unique points as initial centers.")
+        print(f"Subspace {group_index}: Found {len(unique_points)} unique points.")
+        if len(unique_points) < args.num_clusters:
+            print(f"Subspace {group_index}: Using all {len(unique_points)} unique points as initial centers.")
             initial_centers = unique_points
         else:
-            # Otherwise, take the first 'num_clusters' unique points.
-            initial_centers = unique_points[:num_clusters]
+            # Otherwise, take the first args.num_clusters unique points.
+            initial_centers = unique_points[:args.num_clusters]
         
-        # Use the number of unique initial centers as the number of clusters.
         n_clusters = initial_centers.shape[0]
-        # Run sklearn's KMeans clustering.
         kmeans = KMeans(n_clusters=n_clusters, init=initial_centers, max_iter=500, n_init=1, random_state=42)
         labels = kmeans.fit_predict(dense_points)
         all_labels.append(labels)
         centers = kmeans.cluster_centers_
-        print("Created labels for group", group_index)
-        print(f"Group {group_index}: Found clusters: {np.unique(labels)}")
+        print(f"Subspace {group_index}: Cluster labels: {np.unique(labels)}")
         codebook.append(centers)
     
-    # Save the codebook (this can later be used for query processing)
+    # --- Save the codebook ---
     with open(args.codebook_out, "wb") as f:
         pickle.dump(codebook, f)
     print(f"Codebook saved to '{args.codebook_out}'.")
 
-    # --- (Optional) Build and save the PQ index ---
-    # For each original vector (order is preserved), combine the cluster assignments from all m subspaces.
-    num_vectors = len(all_vector_str)
+    # --- Build and save the PQ index ---
+    # For each original vector (order preserved), combine the cluster assignments from all m subspaces.
     pq_index = {}
     for i in range(num_vectors):
         # The PQ code is a tuple: (label from subspace 0, label from subspace 1, ..., label from subspace m-1)
-        code = tuple(all_labels[j][i] for j in range(m))
+        code = tuple(all_labels[j][i] for j in range(args.m))
         pq_index[i] = code
 
     with shelve.open(args.pq_index_out) as db:
         for key, value in pq_index.items():
             db[str(key)] = value
     print(f"PQ index saved to '{args.pq_index_out}'.")
+
+if __name__ == "__main__":
+    main()

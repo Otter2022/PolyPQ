@@ -121,7 +121,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Clustering using scikit-learn-extra's KMedoids with a weighted Jaccard metric"
     )
-    parser.add_argument("--data_path", type=str, default="../../../uni_filtered_pk-5e-06-5e-05-147-147",
+    parser.add_argument("--data_path", type=str, default="../data/tmp/shared/encoding/pk-50k0.002/",
                         help="Path to the folder containing the encoded files.")
     parser.add_argument("--d", type=int, default=21609,
                         help="Dimensionality of the full vector.")
@@ -140,7 +140,8 @@ if __name__ == "__main__":
     m = args.m
     num_clusters = args.num_clusters
 
-    exclusion_regex = r'^.*_(?:[1-9][0-9]\d{3}).*$'
+    # Exclude files with numbers >= 40000 in their name.
+    exclusion_regex = r'^.*_(?:[4-9]\d{4}|\d{6,}).*$'
     
     all_vector_str = readAllSparseStr(data_path, exclusion_regex=exclusion_regex)
     print(f"Read {len(all_vector_str)} sparse vectors.")
@@ -152,28 +153,32 @@ if __name__ == "__main__":
     # Build the codebook and PQ index using k-medoids clustering.
     codebook = []       # Will store one codebook per subspace (using candidate centers)
     all_labels = []     # Holds the cluster assignments for each subspace
+    
 
     for group_index, subvector_group in enumerate(subvectors):
         # Convert each subvector to a list of floats.
         group_points = [list(map(bool, vec)) for vec in subvector_group]
         num_points = len(group_points)
+        current_clusters = num_clusters if num_points >= num_clusters else num_points
+        if current_clusters != num_clusters:
+            print(f"Group {group_index}: Reducing number of clusters to {current_clusters}")
         
-        # Run k-medoids clustering using scikit-learn-extra.
-        kmedoids = KMedoids(
-            n_clusters=num_clusters, 
-            metric='jaccard', 
-            init='k-medoids++',
-            random_state=0
-        )
-        kmedoids.fit(group_points)
-        labels = kmedoids.labels_.tolist()
+        dense_points = np.array(group_points)
+        unique_points = np.unique(dense_points, axis=0)
+        print(f"Group {group_index}: Found {len(unique_points)} unique points.")
+        if len(unique_points) < current_clusters:
+            print(f"Group {group_index}: Using all {len(unique_points)} unique points as candidates.")
+        
+        # Run k-medoids clustering.
+        # The function returns a list of cluster labels.
+        labels = pykmedoidsmodule.kmedoids(group_points, current_clusters, metric="weighted_jaccard")
         all_labels.append(labels)
         print("Created labels for group", group_index)
         
-        # Instead of computing medoids from scratch, use the first current_clusters unique points as the codebook.
-        # (Alternatively, you could use kmedoids.cluster_centers_ if that fits your needs.)
-        codebook_group = kmedoids.cluster_centers_
+        # Instead of computing medoids, use the first current_clusters unique points as the codebook.
+        codebook_group = unique_points[:current_clusters]
         codebook.append(np.array(codebook_group))
+        print(codebook)
         print(f"Group {group_index}: Codebook (candidate centers) has shape {codebook_group.shape}")
     
     # Save the codebook for later use.
