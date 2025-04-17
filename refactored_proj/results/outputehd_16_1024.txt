@@ -1,0 +1,6 @@
+Loaded query vectors, shape: (31143, 512)
+Loaded database codes, shape: (31143, 16)
+Loaded 16 codebooks.
+Loaded groundtruth for 5660 queries from groundtruth files.
+Filtered queries: using 5660 queries out of 31143
+Recall@100 (adc with adc_metric=l2): 0.0039

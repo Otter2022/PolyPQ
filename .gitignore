@@ -12,3 +12,5 @@ python/*.pkl
 python/*.txt
 python/*.png
 .DS_Store
+refactored_proj/output*
+refactored_proj/*.fvecs

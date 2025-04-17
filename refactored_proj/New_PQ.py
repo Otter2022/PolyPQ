@@ -86,6 +86,8 @@ def parse_args():
                         help="Prefix for the output files (default: 'output')")
     parser.add_argument("--output_dir", type=str, default=".",
                         help="Directory to save the output files (default: current directory)")
+    parser.add_argument("--limit", type=int, default=-1,
+                        help="Maximum number of vectors to load (default: -1 means load all vectors)")
     return parser.parse_args()
 
 def main():
@@ -95,10 +97,15 @@ def main():
         os.makedirs(args.output_dir)
     
     # Load descriptors using your utility functions.
-    descriptors = utils.load_vectors(args.data_file, sparse=True, dimension=18382)
+    descriptors = utils.load_vectors(args.data_file, sparse=True, dimension=21609)
     if descriptors.dtype != np.float32:
         descriptors = descriptors.astype(np.float32)
     print("Loaded descriptors shape:", descriptors.shape)
+
+    if args.limit > 0:
+        descriptors = descriptors[:args.limit]
+        print(f"Limiting descriptors to the first {args.limit} vectors. New shape: {descriptors.shape}")
+
     # Perform product quantization with the chosen clustering metric.
     quantized_codes, codebooks = product_quantization(descriptors, M=args.M, Ks=args.Ks, clustering_metric=args.clustering_metric)
     print("Quantized codes shape:", quantized_codes.shape)
